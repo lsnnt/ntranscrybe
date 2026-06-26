@@ -1,5 +1,7 @@
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use std::sync::mpsc::channel;
+use std::thread;
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let host = cpal::default_host();
 
@@ -22,20 +24,39 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let stream = device.build_input_stream(
         streamconfig,
-        move |data: &[f32], _: &cpal::InputCallbackInfo| {
+        move |data: &[f32], _| {
             let _ = tx.send(data.to_vec());
         },
         err_fn,
         None,
     )?;
     stream.play()?;
-    std::thread::spawn(move || {
-        while let Ok(data) = rx.recv() {
-            println!("Data received: {:?}", data);
+    thread::spawn(move || {
+        // let mut audio_buffer: Vec<f32> = Vec::new();
+
+        while let Ok(raw_audio_data) = rx.recv() {
+        //     Downsampling the data (usually in 48Khz needed 16Khz)
+        //     48000 - > 16000 Hz
+            let mut mono_16khz = Vec::with_capacity(raw_audio_data.len() / 6);
+            for chunk in raw_audio_data.chunks_exact(6) {
+                // Downmix the first stereo frame of this group to mono
+                let mono1 = (chunk[0] + chunk[1]) / 2.0;
+                let mono2 = (chunk[2] + chunk[3]) / 2.0;
+                let mono3 = (chunk[4] + chunk[5]) / 2.0;
+
+                // Average the 3 mono samples to get 1 downsampled sample
+                let final_sample = (mono1 + mono2 + mono3) / 3.0;
+
+
+                mono_16khz.push(final_sample); // Decimates by 3 automatically by skipping the other 2 frames
+                println!("Mono 16khz: {:?}", mono_16khz);
+            }
+
+
         }
     });
 
     loop {
-        std::thread::sleep(std::time::Duration::from_secs(1));
+        thread::sleep(std::time::Duration::from_secs(1));
     }
 }
