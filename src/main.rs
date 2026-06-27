@@ -1,4 +1,5 @@
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
+use rubato::{FftFixedIn, Resampler};
 use std::io::Write;
 use std::sync::mpsc::channel;
 use std::thread;
@@ -16,7 +17,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         patience: -1.0,
     });
 
-
     // we also explicitly disable anything that prints to stdout
     // despite all of this you will still get things printing to stdout,
     // be prepared to deal with it
@@ -25,7 +25,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     params.set_print_realtime(false);
     params.set_print_timestamps(false);
     params.set_translate(true);
-
     let device = host
         .input_devices()?
         .find(|device| device.to_string().contains("BlackHole"))
@@ -53,54 +52,79 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     )?;
     stream.play()?;
     thread::spawn(move || {
+        let mut resampler =
+            FftFixedIn::<f32>::new(48000, 16000, 1024, 1, 1).expect("failed to create resampler");
+
         let mut audio_buffer: Vec<f32> = Vec::new();
+        let mut resample_buffer: Vec<f32> = Vec::new();
         let sample_rate = 16000;
-        let process_interval = sample_rate * 3; // Process every 3 seconds of audio
-        let max_window_size = sample_rate * 30; // Keep max 30 seconds of context
-        let mut state = ctx.create_state().expect("failed to create state");
+        let process_interval = sample_rate * 3; // run every 3 seconds
+        let overlap = sample_rate * 2; // keep last 2 seconds
+        let window_size = sample_rate * 10; // max 10 second context
+
         let mut new_samples_counter = 0;
-
+        let mut previous_text = String::new();
+        let mut state = ctx.create_state().expect("failed to create state");
         while let Ok(raw_audio_data) = rx.recv() {
-            //     Downsampling the data (usually in 48Khz needed 16Khz)
-            //     48000 - > 16000 Hz
-            let mut mono_16khz = Vec::with_capacity(raw_audio_data.len() / 6);
-            for chunk in raw_audio_data.chunks_exact(6) {
-                // Downmix the first stereo frame of this group to mono
-                let mono1 = (chunk[0] + chunk[1]) / 2.0;
-                let mono2 = (chunk[2] + chunk[3]) / 2.0;
-                let mono3 = (chunk[4] + chunk[5]) / 2.0;
+            // stereo -> mono
+            let mono_48khz: Vec<f32> = raw_audio_data
+                .chunks_exact(2)
+                .map(|frame| (frame[0] + frame[1]) * 0.5)
+                .collect();
 
-                // Average the 3 mono samples to get 1 downsampled sample
-                let final_sample = (mono1 + mono2 + mono3) / 3.0;
+            // accumulate until we have enough samples for rubato
+            resample_buffer.extend(mono_48khz);
 
-                mono_16khz.push(final_sample); // Decimates by 3 automatically by skipping the other 2 frames
-                // println!("Mono 16khz: {:?}", mono_16khz);
+            while resample_buffer.len() >= 1024 {
+                let chunk: Vec<f32> = resample_buffer.drain(..1024).collect();
+
+                let output = match resampler.process(&[chunk], None) {
+                    Ok(output) => output,
+                    Err(err) => {
+                        eprintln!("Resampler error: {}", err);
+                        break;
+                    }
+                };
+
+                let mono_16khz = &output[0];
+                new_samples_counter += mono_16khz.len();
+                audio_buffer.extend_from_slice(mono_16khz);
             }
-            new_samples_counter += mono_16khz.len();
-            audio_buffer.extend(mono_16khz);
-
-            // Draining addition chunks after 30s
 
             if new_samples_counter >= process_interval {
-                if audio_buffer.len() > max_window_size {
-                    let drain_amount = audio_buffer.len() - max_window_size;
-                    audio_buffer.drain(0..drain_amount);
+                if audio_buffer.len() > window_size {
+                    let excess = audio_buffer.len() - window_size;
+                    audio_buffer.drain(..excess);
                 }
-                if let Ok(_) = state.full(params.clone(), &audio_buffer[..]) {
-                    // Use a carriage return `\r` to cleanly refresh the line with updated translations
+
+                if state.full(params.clone(), &audio_buffer).is_ok() {
+                    let mut current_text = String::new();
+
                     for segment in state.as_iter() {
-                        println!(
-                            "[{} - {}]: {}",
-                            // note start and end timestamps are in centiseconds
-                            // (10s of milliseconds)
-                            segment.start_timestamp(),
-                            segment.end_timestamp(),
-                            // the Display impl for WhisperSegment will replace invalid UTF-8 with the Unicode replacement character
-                            segment
-                        );
+                        current_text.push_str(&format!("{} ", segment));
                     }
 
-                    std::io::stdout().flush().unwrap();
+                    let current_text = current_text.trim().to_string();
+
+                    // print only new text
+                    if current_text.starts_with(&previous_text) {
+                        let new_part = current_text[previous_text.len()..].trim();
+
+                        if !new_part.is_empty() {
+                            print!("{} ", new_part);
+                            std::io::stdout().flush().unwrap();
+                        }
+                    } else {
+                        // whisper revised previous tokens
+                        println!("\n{}", current_text);
+                    }
+
+                    previous_text = current_text;
+
+                    // keep only overlap audio
+                    if audio_buffer.len() > overlap {
+                        audio_buffer.drain(..audio_buffer.len() - overlap);
+                    }
                 }
 
                 new_samples_counter = 0;

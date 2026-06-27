@@ -6,3 +6,4 @@ edition = "2024"
 [dependencies]
 cpal = "0.18.1"
 whisper-rs = { version = "0.16", features = ["metal"] }
+rubato = "0.16.2"
