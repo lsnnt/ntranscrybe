@@ -1,24 +1,30 @@
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
+use std::io::Write;
 use std::sync::mpsc::channel;
 use std::thread;
-use std::io::Write;
-use whisper_rs::{WhisperContext,WhisperContextParameters,FullParams,SamplingStrategy};
+use whisper_rs::{FullParams, SamplingStrategy, WhisperContext, WhisperContextParameters};
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let host = cpal::default_host();
     // model loading
-    let path= std::env::args().nth(1).expect("No path given");
-    let ctx = WhisperContext::new_with_params(
-        path,
-        WhisperContextParameters::default()
-    ).expect("failed to load model");
+    let path = std::env::args().nth(1).expect("No path given");
+    // turn off verbose logging
+    whisper_rs::install_logging_hooks();
+    let ctx = WhisperContext::new_with_params(path, WhisperContextParameters::default())
+        .expect("failed to load model");
     let mut params = FullParams::new(SamplingStrategy::BeamSearch {
         beam_size: 5,
         patience: -1.0,
     });
-    params.set_language(Some("auto"));
-    params.set_translate(true);
+
+
+    // we also explicitly disable anything that prints to stdout
+    // despite all of this you will still get things printing to stdout,
+    // be prepared to deal with it
     params.set_print_special(false);
     params.set_print_progress(false);
+    params.set_print_realtime(false);
+    params.set_print_timestamps(false);
+    params.set_translate(true);
 
     let device = host
         .input_devices()?
@@ -81,16 +87,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     audio_buffer.drain(0..drain_amount);
                 }
                 if let Ok(_) = state.full(params.clone(), &audio_buffer[..]) {
-                    let num_segments = state.full_n_segments();
-
                     // Use a carriage return `\r` to cleanly refresh the line with updated translations
-                    print!("\r");
-                    for i in 0..num_segments {
-                        if let Some(segment) = state.get_segment(i) {
-                            if let Ok(segment_text) = segment.to_str_lossy() {
-                                print!("{} ", segment_text.trim());
-                            }
-                        }
+                    for segment in state.as_iter() {
+                        println!(
+                            "[{} - {}]: {}",
+                            // note start and end timestamps are in centiseconds
+                            // (10s of milliseconds)
+                            segment.start_timestamp(),
+                            segment.end_timestamp(),
+                            // the Display impl for WhisperSegment will replace invalid UTF-8 with the Unicode replacement character
+                            segment
+                        );
                     }
 
                     std::io::stdout().flush().unwrap();
