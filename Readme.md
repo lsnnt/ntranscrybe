@@ -49,3 +49,7 @@ Next i need help from someone with swift macos development who can integrate it 
 
 ## Special Thanks
 To all my dependencies rubato for audio processing cpal for getting audio and whisper-rs for whisper.cpp rust binding without which the idea may not be possible
+
+## License
+
+GNU GPL v3
